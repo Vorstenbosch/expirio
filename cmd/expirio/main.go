@@ -1,39 +1,94 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
-	"fmt"
-	"net"
-	"os"
-	"time"
-	"github.com/vorstenbosch/expirio/internal/model"
+    "crypto/tls"
+    "crypto/x509"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "net"
+    "os"
+    "strings"
+    "time"
+    "github.com/vorstenbosch/expirio/internal/model"
 )
 
 func main() {
-    args := os.Args[1:]
-    
-    if len(args) < 1 {
-        fmt.Println("Usage: expirio [options] <host1> <host2> ...")
+    mode := flag.String("mode", "info", "mode of operation: info or warn")
+    days := flag.Int("days", 30, "Number of days to warn before certificate expiration (only used in warn mode)")
+    file := flag.String("file", "", "Path to file containing list of hosts (one per line)")
+  
+    flag.Usage = func() {
+        fmt.Fprintf(os.Stderr, "Usage: %s [options] <host1> <host2> ...\n\n", os.Args[0])
+        fmt.Fprintf(os.Stderr, "Options:\n")
+        flag.PrintDefaults()
+    }
+
+    flag.Parse()
+
+    args := flag.Args() // remaining hosts after flags
+
+    if len(args) < 1 || *mode != "info" && *mode != "warn" {
+        flag.Usage()
         os.Exit(1)
     }
 
-    var hostsInfo []model.HostInfo
+    var endpoints []model.Endpoint
+
+    // Read hosts from file if specified
+    if *file != "" {
+        fileHosts, err := readHostsFromFile(*file)
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+            os.Exit(1)
+        }
+        args = append(args, fileHosts...)
+    }
 
     for _, host := range args {
         hostInfo, err := getHostInfo(host)
         if err != nil {
-            fmt.Printf("Error retrieving info for host %s: %v\n", host, err)
+            fmt.Fprintf(os.Stderr, "Error retrieving info for host %s: %v\n", host, err)
         }
 
-        hostsInfo = append(hostsInfo, hostInfo)
+        endpoints = append(endpoints, hostInfo)
     }
 
-    printHostsInfo(hostsInfo)
+    if *mode == "info" {
+        printendpoints(endpoints)
+    } else {
+        for _, hostInfo := range endpoints {
+            printWarningIfExpiring(hostInfo, *days)
+        }
+    }
 }
 
-func getHostInfo(host string) (model.HostInfo, error) {
-    hostInfo := model.HostInfo{Host: host}
+func readHostsFromFile(filePath string) ([]string, error) {
+    data, err := os.ReadFile(filePath)
+    if err != nil {
+        return nil, err
+    }
+
+    lines := []string{}
+    for _, line := range strings.Split(string(data), "\n") {
+        trimmed := strings.TrimSpace(line)
+        if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+            lines = append(lines, trimmed)
+        }
+    }
+    return lines, nil
+}
+
+func printWarningIfExpiring(hostInfo model.Endpoint, days int) {
+    for _, certInfo := range hostInfo.CertificatesInfo {
+        if certInfo.DaysRemaining <= days {
+            printJSON(certInfo)
+        }
+    }
+}
+
+func getHostInfo(host string) (model.Endpoint, error) {
+    hostInfo := model.Endpoint{Host: host}
     
     // Add port if not specified
     if _, _, err := net.SplitHostPort(host); err != nil {
@@ -48,6 +103,8 @@ func getHostInfo(host string) (model.HostInfo, error) {
         return hostInfo, fmt.Errorf("error connecting: %w", err)
     }
     defer conn.Close()
+
+    hostInfo.Port = fmt.Sprintf("%d", conn.RemoteAddr().(*net.TCPAddr).Port)
 
     // Get certificates
     certs := conn.ConnectionState().PeerCertificates
@@ -95,17 +152,15 @@ func getHostInfo(host string) (model.HostInfo, error) {
 }
 
 
-func printHostsInfo(hostsInfo []model.HostInfo) {
-	for _, hostInfo := range hostsInfo {
-		fmt.Printf("Host: %s\n", hostInfo.Host)
-		for _, certInfo := range hostInfo.CertificatesInfo {
-			fmt.Printf("  Certificate:\n")
-			fmt.Printf("    Issuer: %s\n", certInfo.Issuer)
-			fmt.Printf("    Valid From: %s\n", certInfo.ValidFrom)
-			fmt.Printf("    Valid To: %s\n", certInfo.ValidTo)
-			fmt.Printf("    Days Remaining: %d\n", certInfo.DaysRemaining)
-			fmt.Printf("    Trusted: %t\n", certInfo.Trusted)
-		}
-		fmt.Println()
-	}
+func printendpoints(endpoints []model.Endpoint) {
+    printJSON(endpoints)
+}
+
+func printJSON[T any](data T) {
+    jsonData, err := json.MarshalIndent(data, "", "  ")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Println(string(jsonData))
 }

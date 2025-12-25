@@ -1,6 +1,7 @@
 package model
 
-type HostInfo struct {
+type Endpoint struct {
 	Host           string
+	Port 		 string
 	CertificatesInfo []CertificateInfo
 }
